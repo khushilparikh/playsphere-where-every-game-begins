@@ -1,0 +1,1102 @@
+// PlaySphere — Prisma schema
+// Run `npx prisma migrate dev --name init` after setting DATABASE_URL in .env
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+// ---------------------------------------------------------------------------
+// Enums
+// ---------------------------------------------------------------------------
+
+enum Role {
+  PLAYER
+  ORGANIZER
+  VENUE_OWNER
+  TRAINER
+  ADMIN
+}
+
+enum UserStatus {
+  ACTIVE
+  SUSPENDED
+}
+
+enum Sport {
+  CRICKET
+  FOOTBALL
+  BADMINTON
+  BASKETBALL
+  TENNIS
+  TABLE_TENNIS
+  VOLLEYBALL
+}
+
+enum VenueStatus {
+  ACTIVE
+  UNDER_REVIEW
+}
+
+// Task 5, Phase 2: same shape as VenueStatus, kept as a separate enum
+// (rather than reusing VenueStatus) so the two domains can diverge later
+// without a migration — e.g. a future REJECTED/SUSPENDED state for one
+// but not the other.
+enum TrainerStatus {
+  ACTIVE
+  UNDER_REVIEW
+}
+
+enum BookingStatus {
+  PENDING
+  CONFIRMED
+  DECLINED
+  CANCELLED
+}
+
+enum TournamentStatus {
+  REGISTRATION_OPEN
+  IN_PROGRESS
+  COMPLETED
+}
+
+enum RegistrationStatus {
+  PENDING
+  APPROVED
+  REJECTED
+}
+
+enum MatchStatus {
+  LIVE
+  UPCOMING
+  FT
+}
+
+enum NotificationType {
+  BOOKING
+  TOURNAMENT
+  COMMUNITY
+  SYSTEM
+}
+
+enum SkillLevel {
+  BEGINNER
+  INTERMEDIATE
+  ADVANCED
+}
+
+enum PaymentStatus {
+  PENDING
+  SUCCESS
+  FAILED
+  EXPIRED
+  REFUNDED
+}
+
+enum PaymentMethod {
+  UPI
+  CARD
+  NETBANKING
+  WALLET
+}
+
+// ---------------------------------------------------------------------------
+// Core identity
+// ---------------------------------------------------------------------------
+
+model User {
+  id                   String   @id @default(cuid())
+  name                 String
+  email                String   @unique
+  passwordHash         String
+  phone                String?
+  area                 String?
+  role                 Role     @default(PLAYER)
+  status               UserStatus @default(ACTIVE)
+  // Task 45, Phase 6: bumped by POST /api/auth/logout-all — any JWT
+  // signed with an older tokenVersion stops verifying (see getAuthUser
+  // in lib/auth.ts), giving a real "log out of all other devices" action.
+  tokenVersion         Int      @default(0)
+  // Task 47, Phase 6: TOTP-based 2FA (Admin accounts). totpSecret is set
+  // as soon as setup starts but totpEnabled stays false until the user
+  // confirms a valid code — see app/api/auth/2fa/*.
+  totpSecret           String?
+  totpEnabled          Boolean  @default(false)
+  sportsPassportLevel  String   @default("Bronze")
+  matchesPlayed        Int      @default(0)
+  tournamentsWon       Int      @default(0)
+  sportsPref           Sport[]  @default([])
+  // Task 35, Phase 6: hashtags a user follows, for a personalized feed
+  // filter — plain lowercase strings, same format extractHashtags() produces.
+  followedTags         String[] @default([])
+  organizationName     String?  // Organizer-specific
+  createdAt            DateTime @default(now())
+  updatedAt            DateTime @updatedAt
+
+  // Richer profile (Module 2)
+  avatar               String?  // data URL, compressed client-side like community images
+  banner               String?
+  bio                  String?
+  skillRating          Int      @default(0) // 0-10, self-reported + admin-adjustable
+  availability         String?  // e.g. "Weekday evenings, weekends"
+  dominantHand         String?  // e.g. "Right", "Left"
+  languages            String[] @default([])
+  experienceLevel      String?  // e.g. "Beginner", "Club level", "State level"
+
+  // Gamification (Module 13) — sportsPassportLevel above doubles as the "level" label,
+  // recomputed from xp whenever it changes (see lib/gamification.ts)
+  xp                   Int      @default(0)
+
+  // Notification preferences (Module 1)
+  notifyEmail          Boolean  @default(true)
+  notifyBooking        Boolean  @default(true)
+  notifyTournament     Boolean  @default(true)
+  notifyCommunity      Boolean  @default(true)
+
+  // Privacy & account lifecycle (Module 1)
+  profileVisibility    String   @default("public") // "public" | "private"
+  deletedAt            DateTime? // soft delete — account is hidden/blocked, not erased
+
+  // Relations
+  ownedVenues          Venue[]            @relation("VenueOwner")
+  bookings             Booking[]          @relation("BookingUser")
+  organizedTournaments Tournament[]       @relation("TournamentOrganizer")
+  capitainedTeams      Team[]             @relation("TeamCaptain")
+  teamMemberships      TeamMember[]
+  posts                CommunityPost[]
+  playerRequests       PlayerRequest[]
+  trainerProfile       TrainerProfile?
+  ownedAcademies       Academy[]          @relation("AcademyOwner")
+  inquiriesSent        Inquiry[]          @relation("InquiryFrom")
+  notifications        Notification[]
+  studentEnrollments   StudentEnrollment[]
+  chatMessages         ChatMessage[]
+  joinRequestsMade     PlayerRequestJoin[]
+  postComments         PostComment[]
+  postLikes            PostLike[]
+  postBookmarks        PostBookmark[]
+  badges               UserBadge[]
+  venueReviews         VenueReview[]
+  practiceAttendance   PracticeAttendance[]
+  auditLogs            AuditLog[]
+  loginEvents          LoginEvent[]
+  startedMatches       LiveMatch[]
+  packagePurchases     PackagePurchase[]
+  trainerReviews       TrainerReview[]
+  trainingSessions     TrainingSession[]
+  // Task 21, Phase 5: 1:1 direct messages, separate from team ChatMessage
+  // and trainer Inquiry — see the DirectMessage model below.
+  messagesSent         DirectMessage[]    @relation("MessageSender")
+  messagesReceived     DirectMessage[]    @relation("MessageRecipient")
+  videoProgress        VideoProgress[]
+  leaderboardSnapshots LeaderboardSnapshot[]
+  payments             PaymentTransaction[]
+
+  @@index([email])
+  @@index([role])
+  @@index([xp])
+}
+
+// Task 21, Phase 5: a private 1:1 message between two users. Deliberately
+// separate from ChatMessage (team-scoped) and Inquiry (player-to-trainer,
+// with a single reply) — this is general-purpose player-to-player DMs.
+model DirectMessage {
+  id        String   @id @default(cuid())
+  from      User     @relation("MessageSender", fields: [fromId], references: [id], onDelete: Cascade)
+  fromId    String
+  to        User     @relation("MessageRecipient", fields: [toId], references: [id], onDelete: Cascade)
+  toId      String
+  content   String
+  read      Boolean  @default(false)
+  createdAt DateTime @default(now())
+
+  @@index([fromId])
+  @@index([toId])
+  // Fast "conversation between these two people" lookups in either direction.
+  @@index([fromId, toId])
+  @@index([toId, fromId])
+}
+
+// ---------------------------------------------------------------------------
+// Venue Booking module
+// ---------------------------------------------------------------------------
+
+model Venue {
+  id              String      @id @default(cuid())
+  owner           User        @relation("VenueOwner", fields: [ownerId], references: [id], onDelete: Cascade)
+  ownerId         String
+  name            String
+  area            String
+  address         String?
+  latitude        Float?
+  longitude       Float?
+  description     String?
+  contactPhone    String?
+  amenities       String[]    @default([]) // e.g. Parking, Washroom, Floodlights, Drinking Water
+  sports          Sport[]
+  pricePerHour    Int
+  rating          Float       @default(0)
+  reviews         Int         @default(0)
+  image           String?
+  slotsLeftToday  Int         @default(0)
+  status          VenueStatus @default(UNDER_REVIEW)
+  bookingsToday   Int         @default(0)
+  occupancy       Int         @default(0)
+  revenueThisMonth Int        @default(0)
+  createdAt       DateTime    @default(now())
+  // Task 28, Phase 6: shown to the player on the booking modal.
+  cancellationPolicy String?
+
+  bookings        Booking[]
+  matches         LiveMatch[]
+  venueReviews    VenueReview[]
+  // Task 26, Phase 6: multi-photo gallery, in addition to the single
+  // `image` field used as the card thumbnail.
+  images          VenueImage[]
+
+  @@index([ownerId])
+  @@index([area])
+}
+
+// Task 26, Phase 6: additional venue photos beyond Venue.image (the
+// thumbnail). Same shape as TournamentGalleryImage.
+model VenueImage {
+  id      String @id @default(cuid())
+  venue   Venue  @relation(fields: [venueId], references: [id], onDelete: Cascade)
+  venueId String
+  image   String
+  caption String?
+
+  @@index([venueId])
+}
+
+model VenueReview {
+  id        String   @id @default(cuid())
+  venue     Venue    @relation(fields: [venueId], references: [id], onDelete: Cascade)
+  venueId   String
+  user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  userId    String
+  rating    Int      // 1-5
+  comment   String?
+  createdAt DateTime @default(now())
+
+  @@unique([venueId, userId])
+  @@index([venueId])
+}
+
+model Booking {
+  id         String        @id @default(cuid())
+  venue      Venue         @relation(fields: [venueId], references: [id], onDelete: Cascade)
+  venueId    String
+  user       User          @relation("BookingUser", fields: [userId], references: [id], onDelete: Cascade)
+  userId     String
+  sport      Sport
+  slot       String        // human-readable slot, e.g. "Sun, 7:00-8:00 AM"
+  amount     Int
+  status     BookingStatus @default(PENDING)
+  paymentStatus PaymentStatus @default(PENDING)
+  payment    PaymentTransaction?
+  createdAt  DateTime      @default(now())
+  // Task 25, Phase 6: recurring bookings. Each occurrence is its own
+  // Booking row (so it can be individually confirmed/cancelled), tied
+  // together by a shared recurrenceGroupId so the UI can show "part of a
+  // weekly series" and offer "cancel whole series".
+  recurrenceGroupId String?
+  // Task 28, Phase 6: cancellation, set when status flips to CANCELLED.
+  cancelledAt        DateTime?
+  cancelledByUserId  String?
+
+  @@index([venueId])
+  @@index([userId])
+  @@index([recurrenceGroupId])
+}
+
+// ---------------------------------------------------------------------------
+// Tournament Management module
+// ---------------------------------------------------------------------------
+
+model Tournament {
+  id                String            @id @default(cuid())
+  organizer         User              @relation("TournamentOrganizer", fields: [organizerId], references: [id], onDelete: Cascade)
+  organizerId       String
+  name              String
+  sport             Sport
+  format            String
+  bracketType       String            @default("KNOCKOUT") // "KNOCKOUT" | "LEAGUE"
+  isPublic          Boolean           @default(true) // false = invite-only / private registration
+  teamsCap          Int
+  entryFee          Int
+  startDate         DateTime
+  status            TournamentStatus  @default(REGISTRATION_OPEN)
+  revenueCollected  Int               @default(0)
+  createdAt         DateTime          @default(now())
+
+  registrations     TeamRegistration[]
+  matches           LiveMatch[]
+  sponsors          TournamentSponsor[]
+  officials         TournamentOfficial[]
+  galleryImages     TournamentGalleryImage[]
+
+  @@index([organizerId])
+  @@index([status])
+}
+
+model TournamentSponsor {
+  id           String     @id @default(cuid())
+  tournament   Tournament @relation(fields: [tournamentId], references: [id], onDelete: Cascade)
+  tournamentId String
+  name         String
+  logo         String?
+  tier         String     @default("Silver") // Title | Gold | Silver | Bronze
+
+  @@index([tournamentId])
+}
+
+model TournamentOfficial {
+  id           String     @id @default(cuid())
+  tournament   Tournament @relation(fields: [tournamentId], references: [id], onDelete: Cascade)
+  tournamentId String
+  name         String
+  role         String     // e.g. Umpire, Referee, Scorer, Match Commissioner
+  contact      String?
+
+  @@index([tournamentId])
+}
+
+model TournamentGalleryImage {
+  id           String     @id @default(cuid())
+  tournament   Tournament @relation(fields: [tournamentId], references: [id], onDelete: Cascade)
+  tournamentId String
+  image        String
+  caption      String?
+  createdAt    DateTime   @default(now())
+
+  @@index([tournamentId])
+}
+
+model Team {
+  id         String   @id @default(cuid())
+  name       String
+  sport      Sport
+  captain    User     @relation("TeamCaptain", fields: [captainId], references: [id], onDelete: Cascade)
+  captainId  String
+  logoColor  String   @default("#2452FF")
+  logo       String?  // uploaded team crest, data URL like community images
+  coachName  String?
+  coachContact String?
+  wins       Int      @default(0)
+  losses     Int      @default(0)
+  createdAt  DateTime @default(now())
+
+  members       TeamMember[]
+  registrations TeamRegistration[]
+  messages      ChatMessage[]
+  practiceSessions PracticeSession[]
+
+  @@index([captainId])
+}
+
+model PracticeSession {
+  id        String   @id @default(cuid())
+  team      Team     @relation(fields: [teamId], references: [id], onDelete: Cascade)
+  teamId    String
+  title     String
+  date      String
+  time      String
+  venue     String?
+  notes     String?
+  createdAt DateTime @default(now())
+
+  attendance PracticeAttendance[]
+
+  @@index([teamId])
+}
+
+model PracticeAttendance {
+  id        String          @id @default(cuid())
+  session   PracticeSession @relation(fields: [sessionId], references: [id], onDelete: Cascade)
+  sessionId String
+  user      User            @relation(fields: [userId], references: [id], onDelete: Cascade)
+  userId    String
+  present   Boolean         @default(true)
+
+  @@unique([sessionId, userId])
+  @@index([sessionId])
+}
+
+model ChatMessage {
+  id        String   @id @default(cuid())
+  team      Team     @relation(fields: [teamId], references: [id], onDelete: Cascade)
+  teamId    String
+  sender    User     @relation(fields: [senderId], references: [id], onDelete: Cascade)
+  senderId  String
+  content   String
+  // Task 32, Phase 6: optional image attachment, uploaded via the shared
+  // /api/uploads endpoint (Task 1, Phase 1) — stores the returned path,
+  // not the raw file.
+  attachmentUrl String?
+  createdAt DateTime @default(now())
+
+  @@index([teamId])
+}
+
+model TeamMember {
+  id       String  @id @default(cuid())
+  team     Team    @relation(fields: [teamId], references: [id], onDelete: Cascade)
+  teamId   String
+  user     User    @relation(fields: [userId], references: [id], onDelete: Cascade)
+  userId   String
+  roleName String  @default("Player")
+
+  @@unique([teamId, userId])
+  @@index([userId])
+}
+
+model TeamRegistration {
+  id           String              @id @default(cuid())
+  tournament   Tournament          @relation(fields: [tournamentId], references: [id], onDelete: Cascade)
+  tournamentId String
+  team         Team                @relation(fields: [teamId], references: [id], onDelete: Cascade)
+  teamId       String
+  players      Int                 @default(11)
+  status       RegistrationStatus  @default(PENDING)
+  paymentStatus PaymentStatus      @default(PENDING)
+  payment      PaymentTransaction?
+  submittedAt  DateTime            @default(now())
+
+  @@unique([tournamentId, teamId])
+  @@index([tournamentId])
+  @@index([status])
+}
+
+// ---------------------------------------------------------------------------
+// Live Scoring module
+// ---------------------------------------------------------------------------
+
+model LiveMatch {
+  id            String       @id @default(cuid())
+  sport         Sport
+  status        MatchStatus  @default(UPCOMING)
+  teamA         String
+  teamB         String
+  scoreA        String       @default("-")
+  scoreB        String       @default("-")
+  meta          String?      // e.g. "Ov 14.2", "72'", "Sun 9:00 AM"
+  venue         Venue?       @relation(fields: [venueId], references: [id])
+  venueId       String?
+  tournament    Tournament?  @relation(fields: [tournamentId], references: [id])
+  tournamentId  String?
+  startedBy     User?        @relation(fields: [startedById], references: [id])
+  startedById   String?
+  updatedAt     DateTime     @updatedAt
+  createdAt     DateTime     @default(now())
+
+  events        MatchEvent[]
+  // Task 42, Phase 6: post-match photos, shown once status flips to FT.
+  highlights    MatchHighlight[]
+
+  @@index([status])
+  @@index([startedById])
+}
+
+// Task 42, Phase 6: a photo uploaded after a match ends, with an optional caption.
+model MatchHighlight {
+  id        String    @id @default(cuid())
+  match     LiveMatch @relation(fields: [matchId], references: [id], onDelete: Cascade)
+  matchId   String
+  image     String
+  caption   String?
+  createdAt DateTime  @default(now())
+
+  @@index([matchId])
+}
+
+model MatchEvent {
+  id        String    @id @default(cuid())
+  match     LiveMatch @relation(fields: [matchId], references: [id], onDelete: Cascade)
+  matchId   String
+  sequence  Int       // order within the match, e.g. ball/point number
+  marker    String    // e.g. "Over 12.4", "45'", "Set 2, 15-10"
+  eventType String    // e.g. "RUN", "WICKET", "GOAL", "POINT", "FOUL"
+  team      String?   // "A" | "B" | null — which side this event belongs to
+  description String
+  scoreA    String    // score snapshot after this event
+  scoreB    String
+  x         Float?    // 0-100, position on the field/court diagram — powers heatmaps
+  y         Float?    // 0-100
+  createdAt DateTime  @default(now())
+
+  @@index([matchId])
+}
+
+// ---------------------------------------------------------------------------
+// Community module
+// ---------------------------------------------------------------------------
+
+model CommunityPost {
+  id        String   @id @default(cuid())
+  author    User     @relation(fields: [authorId], references: [id], onDelete: Cascade)
+  authorId  String
+  content   String
+  sport     Sport?
+  image     String?
+  tags      String[] @default([]) // hashtags parsed from content, e.g. ["cricket", "satellite"]
+  likes     Int      @default(0)  // denormalized count, kept in sync with PostLike rows
+  comments  Int      @default(0)  // denormalized count, kept in sync with PostComment rows
+  createdAt DateTime @default(now())
+  // Task 34, Phase 6: auto-hidden from the public feed once open reports
+  // cross a threshold (see app/api/admin/reports/route.ts), pending admin
+  // review — the author and admins can still see it.
+  hidden    Boolean  @default(false)
+
+  reports    Report[]
+  postLikes  PostLike[]
+  postComments PostComment[]
+  bookmarks  PostBookmark[]
+  // Task 36, Phase 6: additional images beyond the single `image` field
+  // above (kept as the primary/cover image for backward compatibility
+  // with existing posts and card thumbnails).
+  images     CommunityPostImage[]
+
+  @@index([authorId])
+  @@index([tags])
+}
+
+// Task 36, Phase 6: extra photos for a multi-image post, rendered as a
+// carousel alongside the cover `CommunityPost.image`.
+model CommunityPostImage {
+  id     String        @id @default(cuid())
+  post   CommunityPost @relation(fields: [postId], references: [id], onDelete: Cascade)
+  postId String
+  image  String
+  order  Int           @default(0)
+
+  @@index([postId])
+}
+
+model PostLike {
+  id        String   @id @default(cuid())
+  post      CommunityPost @relation(fields: [postId], references: [id], onDelete: Cascade)
+  postId    String
+  user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  userId    String
+  createdAt DateTime @default(now())
+
+  @@unique([postId, userId])
+  @@index([postId])
+}
+
+model PostComment {
+  id        String   @id @default(cuid())
+  post      CommunityPost @relation(fields: [postId], references: [id], onDelete: Cascade)
+  postId    String
+  author    User     @relation(fields: [authorId], references: [id], onDelete: Cascade)
+  authorId  String
+  content   String
+  createdAt DateTime @default(now())
+
+  @@index([postId])
+}
+
+model PostBookmark {
+  id        String   @id @default(cuid())
+  post      CommunityPost @relation(fields: [postId], references: [id], onDelete: Cascade)
+  postId    String
+  user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  userId    String
+  createdAt DateTime @default(now())
+
+  @@unique([postId, userId])
+  @@index([userId])
+}
+
+model PlayerRequest {
+  id             String     @id @default(cuid())
+  postedBy       User       @relation(fields: [postedById], references: [id], onDelete: Cascade)
+  postedById     String
+  title          String
+  sport          Sport
+  area           String
+  date           String
+  playersNeeded  Int
+  level          SkillLevel @default(INTERMEDIATE)
+  createdAt      DateTime   @default(now())
+
+  @@index([postedById])
+  @@index([sport])
+
+  joinRequests PlayerRequestJoin[]
+}
+
+enum JoinRequestStatus {
+  PENDING
+  ACCEPTED
+  DECLINED
+}
+
+model PlayerRequestJoin {
+  id          String            @id @default(cuid())
+  request     PlayerRequest     @relation(fields: [requestId], references: [id], onDelete: Cascade)
+  requestId   String
+  requester   User              @relation(fields: [requesterId], references: [id], onDelete: Cascade)
+  requesterId String
+  message     String?
+  status      JoinRequestStatus @default(PENDING)
+  createdAt   DateTime          @default(now())
+
+  @@unique([requestId, requesterId])
+  @@index([requestId])
+}
+
+// ---------------------------------------------------------------------------
+// Trainer & Academy module
+// ---------------------------------------------------------------------------
+
+enum SessionMode {
+  ONLINE
+  OFFLINE
+  HYBRID
+}
+
+enum SessionStatus {
+  SCHEDULED
+  COMPLETED
+  CANCELLED
+}
+
+enum RescheduleStatus {
+  NONE
+  PENDING
+  APPROVED
+  REJECTED
+}
+
+model TrainerProfile {
+  id           String   @id @default(cuid())
+  user         User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  userId       String   @unique
+  sport        Sport
+  experience   String
+  rating       Float    @default(0)
+  reviewCount  Int      @default(0)
+  studentCount Int      @default(0)
+  area         String
+  price        String
+  tag          String?
+  bio          String?
+  specializations String[] @default([]) // e.g. "Fast bowling", "Weight training", "Youth coaching"
+  certifications  String[] @default([]) // e.g. "BCCI Level 2", "ACSM Certified"
+  languages       String[] @default([])
+  introVideo      String?  // YouTube/Vimeo link or short intro clip URL
+  responseTime    String?  // e.g. "Usually responds within 2 hours"
+  sessionModes    SessionMode[] @default([OFFLINE]) // which modes this trainer offers
+  // Task 5, Phase 2: admin verification flow, mirrors Venue.status.
+  // New trainer profiles start UNDER_REVIEW and are hidden from the
+  // public directory (see GET /api/trainers) until an admin approves them.
+  status          TrainerStatus @default(UNDER_REVIEW)
+
+  batches   TrainerBatch[]
+  inquiries Inquiry[]
+  packages  TrainerPackage[]
+  videos    TrainerVideo[]
+  dietPlans TrainerDietPlan[]
+  reviews   TrainerReview[]
+  sessions  TrainingSession[]
+  // Task 20, Phase 5: weekly recurring availability windows, used to
+  // compute open booking slots — see lib/trainer-availability.ts.
+  availability TrainerAvailability[]
+
+  @@index([sport])
+}
+
+// Task 20, Phase 5: one row per recurring weekly window a trainer is
+// open for sessions, e.g. "Monday 09:00–12:00". Kept deliberately simple
+// (fixed 60-minute slots, one flat weekly pattern with no date-specific
+// overrides/holidays yet) rather than a full calendar system.
+model TrainerAvailability {
+  id        String         @id @default(cuid())
+  trainer   TrainerProfile @relation(fields: [trainerId], references: [id], onDelete: Cascade)
+  trainerId String
+  dayOfWeek Int            // 0 = Sunday … 6 = Saturday
+  startTime String         // "09:00"
+  endTime   String         // "18:00"
+
+  @@index([trainerId])
+}
+
+model Academy {
+  id          String   @id @default(cuid())
+  owner       User     @relation("AcademyOwner", fields: [ownerId], references: [id], onDelete: Cascade)
+  ownerId     String
+  name        String
+  sports      Sport[]
+  area        String
+  batches     Int      @default(0)
+  established String
+  rating      Float    @default(0)
+  // Task 5, Phase 2: same admin verification pattern as TrainerProfile.status.
+  status      TrainerStatus @default(UNDER_REVIEW)
+
+  @@index([ownerId])
+}
+
+model TrainerBatch {
+  id        String          @id @default(cuid())
+  trainer   TrainerProfile  @relation(fields: [trainerId], references: [id], onDelete: Cascade)
+  trainerId String
+  name      String
+  time      String
+  days      String
+  venue     String
+  mode      SessionMode     @default(OFFLINE)
+  meetingLink String?       // for ONLINE/HYBRID batches
+
+  students  StudentEnrollment[]
+
+  @@index([trainerId])
+}
+
+model StudentEnrollment {
+  id         String       @id @default(cuid())
+  batch      TrainerBatch @relation(fields: [batchId], references: [id], onDelete: Cascade)
+  batchId    String
+  student    User?        @relation(fields: [studentId], references: [id])
+  studentId  String?
+  studentName String
+  attendance Int          @default(100)
+  since      String
+
+  // Task 38, Phase 6: per-session attendance records, same shape as
+  // PracticeAttendance for teams. `attendance` above stays as a running
+  // summary %, recomputed from these rows when one is added.
+  attendanceRecords BatchAttendance[]
+
+  @@index([batchId])
+}
+
+// Task 38, Phase 6: one row per (batch session date, enrolled student).
+model BatchAttendance {
+  id           String             @id @default(cuid())
+  enrollment   StudentEnrollment  @relation(fields: [enrollmentId], references: [id], onDelete: Cascade)
+  enrollmentId String
+  date         String             // "YYYY-MM-DD"
+  present      Boolean            @default(true)
+
+  @@unique([enrollmentId, date])
+  @@index([enrollmentId])
+}
+
+// ---------------------------------------------------------------------------
+// Trainer Marketplace (Module 8) — packages, online coaching, video library,
+// diet plans, reviews, scheduling & rescheduling.
+// ---------------------------------------------------------------------------
+
+model TrainerPackage {
+  id           String   @id @default(cuid())
+  trainer      TrainerProfile @relation(fields: [trainerId], references: [id], onDelete: Cascade)
+  trainerId    String
+  name         String   // e.g. "8-Session Fast Bowling Intensive"
+  description  String?
+  sessionCount Int      // number of sessions included
+  validityDays Int      @default(30) // how long the student has to use them
+  price        Int
+  mode         SessionMode @default(OFFLINE)
+  active       Boolean  @default(true)
+  createdAt    DateTime @default(now())
+
+  purchases PackagePurchase[]
+
+  @@index([trainerId])
+}
+
+model PackagePurchase {
+  id          String   @id @default(cuid())
+  package     TrainerPackage @relation(fields: [packageId], references: [id], onDelete: Cascade)
+  packageId   String
+  student     User     @relation(fields: [studentId], references: [id], onDelete: Cascade)
+  studentId   String
+  sessionsUsed Int     @default(0)
+  purchasedAt DateTime @default(now())
+  expiresAt   DateTime
+  paymentStatus PaymentStatus @default(PENDING)
+  payment      PaymentTransaction?
+
+  sessions TrainingSession[]
+
+  @@index([packageId])
+  @@index([studentId])
+}
+
+model TrainerVideo {
+  id          String   @id @default(cuid())
+  trainer     TrainerProfile @relation(fields: [trainerId], references: [id], onDelete: Cascade)
+  trainerId   String
+  title       String
+  description String?
+  url         String   // external video URL (YouTube/Vimeo/uploaded link)
+  thumbnail   String?
+  category    String?  // e.g. "Technique", "Drills", "Match Analysis"
+  isPremium   Boolean  @default(false) // premium = only for active package purchasers
+  createdAt   DateTime @default(now())
+
+  // Task 40, Phase 6
+  viewProgress VideoProgress[]
+
+  @@index([trainerId])
+}
+
+// Task 40, Phase 6: per-student watch progress on a trainer video.
+model VideoProgress {
+  id             String       @id @default(cuid())
+  video          TrainerVideo @relation(fields: [videoId], references: [id], onDelete: Cascade)
+  videoId        String
+  user           User         @relation(fields: [userId], references: [id], onDelete: Cascade)
+  userId         String
+  watchedSeconds Int          @default(0)
+  completed      Boolean      @default(false)
+  updatedAt      DateTime     @updatedAt
+
+  @@unique([videoId, userId])
+  @@index([userId])
+}
+
+model TrainerDietPlan {
+  id          String   @id @default(cuid())
+  trainer     TrainerProfile @relation(fields: [trainerId], references: [id], onDelete: Cascade)
+  trainerId   String
+  title       String
+  goal        String   // e.g. "Weight loss", "Muscle gain", "Endurance", "Match-day nutrition"
+  description String
+  isPremium   Boolean  @default(false)
+  // Task 39, Phase 6: a trainer's own past plan can be marked reusable
+  // and used as a starting point for a new student, instead of writing
+  // each plan from scratch every time.
+  isTemplate  Boolean  @default(false)
+  createdAt   DateTime @default(now())
+
+  @@index([trainerId])
+}
+
+model TrainerReview {
+  id        String   @id @default(cuid())
+  trainer   TrainerProfile @relation(fields: [trainerId], references: [id], onDelete: Cascade)
+  trainerId String
+  user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  userId    String
+  rating    Int      // 1-5
+  comment   String?
+  createdAt DateTime @default(now())
+
+  @@unique([trainerId, userId])
+  @@index([trainerId])
+}
+
+model TrainingSession {
+  id          String   @id @default(cuid())
+  trainer     TrainerProfile @relation(fields: [trainerId], references: [id], onDelete: Cascade)
+  trainerId   String
+  student     User     @relation(fields: [studentId], references: [id], onDelete: Cascade)
+  studentId   String
+  purchase    PackagePurchase? @relation(fields: [purchaseId], references: [id])
+  purchaseId  String?
+  date        String
+  time        String
+  mode        SessionMode @default(OFFLINE)
+  meetingLink String?
+  notes       String?
+  status      SessionStatus @default(SCHEDULED)
+
+  // Rescheduling
+  rescheduleStatus   RescheduleStatus @default(NONE)
+  proposedDate       String?
+  proposedTime       String?
+  rescheduleReason   String?
+  rescheduleByUserId String?
+
+  createdAt   DateTime @default(now())
+
+  @@index([trainerId])
+  @@index([studentId])
+}
+
+model Inquiry {
+  id         String          @id @default(cuid())
+  trainer    TrainerProfile  @relation(fields: [trainerId], references: [id], onDelete: Cascade)
+  trainerId  String
+  from       User?           @relation("InquiryFrom", fields: [fromId], references: [id])
+  fromId     String?
+  fromName   String
+  message    String
+  reply      String?
+  createdAt  DateTime        @default(now())
+
+  @@index([trainerId])
+}
+
+// ---------------------------------------------------------------------------
+// Notifications & Admin
+// ---------------------------------------------------------------------------
+
+model Notification {
+  id        String            @id @default(cuid())
+  user      User              @relation(fields: [userId], references: [id], onDelete: Cascade)
+  userId    String
+  title     String
+  detail    String
+  type      NotificationType  @default(SYSTEM)
+  read      Boolean           @default(false)
+  createdAt DateTime          @default(now())
+  // Task 17, Phase 4: notifications sharing the same (userId, groupKey)
+  // while unread get merged into one row instead of duplicated — see
+  // lib/notify.ts#notifyUser. groupCount tracks how many events were
+  // folded into the current title/detail (e.g. "3 people liked your post").
+  groupKey    String?
+  groupCount  Int      @default(1)
+
+  @@index([userId])
+  @@index([userId, groupKey])
+}
+
+enum ReportStatus {
+  OPEN
+  DISMISSED
+  REMOVED
+}
+
+model Report {
+  id         String       @id @default(cuid())
+  post       CommunityPost @relation(fields: [postId], references: [id], onDelete: Cascade)
+  postId     String
+  reason     String
+  status     ReportStatus @default(OPEN)
+  createdAt  DateTime     @default(now())
+
+  @@index([postId])
+  @@index([status])
+}
+
+// ---------------------------------------------------------------------------
+// Gamification (Module 13)
+// ---------------------------------------------------------------------------
+
+// Task 44, Phase 6: a snapshot of one player's standing at the moment a
+// season closes, so the leaderboard can reset for the new season while
+// past standings stay browsable under "Hall of Fame". Written by a
+// one-off script (see scripts/snapshot-season.ts) — no in-app "close
+// season" button, since this should be a deliberate admin/ops action.
+model LeaderboardSnapshot {
+  id      String   @id @default(cuid())
+  season  String   // e.g. "2026-S1"
+  user    User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  userId  String
+  xp      Int
+  rank    Int
+  level   String
+  savedAt DateTime @default(now())
+
+  @@index([season])
+  @@index([userId])
+}
+
+model Badge {
+  id          String   @id @default(cuid())
+  code        String   @unique // e.g. "FIRST_MATCH", "TOURNAMENT_WINNER", "TEN_MATCHES"
+  label       String
+  description String
+  icon        String   // lucide-react icon name, e.g. "Trophy"
+  xpReward    Int      @default(0)
+
+  users UserBadge[]
+}
+
+model UserBadge {
+  id        String   @id @default(cuid())
+  user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  userId    String
+  badge     Badge    @relation(fields: [badgeId], references: [id], onDelete: Cascade)
+  badgeId   String
+  awardedAt DateTime @default(now())
+
+  @@unique([userId, badgeId])
+  @@index([userId])
+}
+
+// ---------------------------------------------------------------------------
+// Security & Admin (Module 1 / Module 17)
+// ---------------------------------------------------------------------------
+
+model AuditLog {
+  id         String   @id @default(cuid())
+  actor      User?    @relation(fields: [actorId], references: [id])
+  actorId    String?
+  actorRole  String?  // PLAYER | ORGANIZER | VENUE_OWNER | TRAINER | ADMIN
+  category   String   @default("ADMIN") // BOOKING | VENUE | TOURNAMENT | PLAYER_REQUEST | INQUIRY | SECURITY | ADMIN
+  action     String   // e.g. "USER_SUSPENDED", "VENUE_ACTIVATED", "REPORT_RESOLVED"
+  targetType String   // e.g. "User", "Venue", "Report"
+  targetId   String
+  detail     String?
+  createdAt  DateTime @default(now())
+
+  @@index([actorId])
+  @@index([category])
+  @@index([actorRole])
+  @@index([createdAt])
+}
+
+model LoginEvent {
+  id        String   @id @default(cuid())
+  user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  userId    String
+  success   Boolean  @default(true)
+  ip        String?
+  userAgent String?
+  createdAt DateTime @default(now())
+
+  @@index([userId])
+}
+
+// ---------------------------------------------------------------------------
+// Demo Payment Gateway
+// ---------------------------------------------------------------------------
+
+model PaymentTransaction {
+  id               String        @id @default(cuid())
+  transactionId    String        @unique // e.g., "TXN_PLAY_8923419"
+  idempotencyKey   String        @unique // Prevents duplicate payment submissions
+  user             User          @relation(fields: [userId], references: [id], onDelete: Cascade)
+  userId           String
+  
+  // Target Relations
+  booking          Booking?      @relation(fields: [bookingId], references: [id], onDelete: SetNull)
+  bookingId        String?       @unique
+  teamReg          TeamRegistration? @relation(fields: [teamRegistrationId], references: [id], onDelete: SetNull)
+  teamRegistrationId String?     @unique
+  packagePurchase  PackagePurchase?  @relation(fields: [packagePurchaseId], references: [id], onDelete: SetNull)
+  packagePurchaseId String?      @unique
+
+  amount           Float
+  currency         String        @default("INR")
+  method           PaymentMethod
+  status           PaymentStatus @default(PENDING)
+  
+  // Security & Telemetry Metadata
+  expiresAt        DateTime      // 5 minutes from creation
+  authStepCompleted Boolean      @default(false) // 3D Secure / OTP passed
+  cardLast4        String?       // e.g. "4242"
+  cardBrand        String?       // e.g. "Visa", "Mastercard"
+  upiId            String?       // e.g. "player@okicici"
+  bankName         String?       // e.g. "HDFC Bank"
+  failureReason    String?       // e.g. "Session Timed Out" | "Incorrect OTP"
+  
+  createdAt        DateTime      @default(now())
+  updatedAt        DateTime      @updatedAt
+
+  @@index([userId])
+  @@index([status])
+  @@index([transactionId])
+  @@index([idempotencyKey])
+}

@@ -1,0 +1,12 @@
+node_modules
+.next
+out
+.env
+.env*.local
+!.env.example
+.env
+
+# User-uploaded files (Task 1: self-hosted upload endpoint) — keep the
+# folder itself tracked via .gitkeep, but never commit real uploads.
+public/uploads/*
+!public/uploads/.gitkeep
